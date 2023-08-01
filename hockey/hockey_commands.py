@@ -1,15 +1,16 @@
+import os
 from datetime import datetime, timezone
-from io import BytesIO
 from typing import List, Literal, Optional
 from urllib.parse import quote
 
 import discord
 from red_commons.logging import getLogger
 from redbot.core import commands
+from redbot.core.data_manager import cog_data_path
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import humanize_list, pagify
 
-from .abc import MixinMeta
+from .abc import HockeyMixin
 from .constants import BASE_URL, TEAMS
 from .helper import (
     DateFinder,
@@ -31,10 +32,10 @@ _ = Translator("Hockey", __file__)
 log = getLogger("red.trusty-cogs.Hockey")
 
 
-hockey_commands = MixinMeta.hockey_commands
+hockey_commands = HockeyMixin.hockey_commands
 
 
-class HockeyCommands(MixinMeta):
+class HockeyCommands(HockeyMixin):
     """
     All the commands grouped under `[p]hockey`
     """
@@ -628,90 +629,115 @@ class HockeyCommands(MixinMeta):
         """
         Posts the leaderboard based on specific style
         """
+        guild = ctx.guild
+        if guild is None:
+            return
 
-        leaderboard_type_str = leaderboard_type.as_str()
-        leaderboard_key = leaderboard_type.key()
-        if leaderboard_type.value > 6:
-            leaderboard = await self.pickems_config.guild(ctx.guild).last_week_leaderboard()
+        if leaderboard_type.is_last_week():
+            leaderboard = await self.pickems_config.guild(guild).last_week_leaderboard()
         else:
-            leaderboard = await self.pickems_config.guild(ctx.guild).leaderboard()
-        if leaderboard == {} or leaderboard is None:
+            leaderboard = await self.pickems_config.guild(guild).leaderboard()
+        if not leaderboard:
             await ctx.send(_("There is no current leaderboard for this server!"))
             return
-        if leaderboard_type != "worst":
+
+        if not leaderboard_type.is_worst():
             leaderboard = sorted(
-                leaderboard.items(), key=lambda i: i[1][leaderboard_key], reverse=True
+                leaderboard.items(), key=lambda i: i[1][leaderboard_type.key()], reverse=True
             )
         else:
             leaderboard = sorted(
-                leaderboard.items(), key=lambda i: i[1]["total"] - i[1]["season"], reverse=True
+                leaderboard.items(),
+                key=lambda i: i[1][leaderboard_type.total_key()] - i[1][leaderboard_type.key()],
+                reverse=True,
             )
         msg_list = []
         count = 1
         user_position = None
-        total_str = {
-            "season": "total",
-            "playoffs": "playoffs_total",
-            "pre-season": "pre-season_total",
-        }.get(leaderboard_type_str, "total")
-        position = None
+        position = ""
 
-        for member_id in leaderboard:
-            if str(member_id[0]) == str(ctx.author.id):
-                user_position = leaderboard.index(member_id)
-            member = ctx.guild.get_member(int(member_id[0]))
+        for member_id, data in leaderboard:
+            if str(member_id) == str(ctx.author.id):
+                user_position = leaderboard.index((member_id, data))
+            member = guild.get_member(int(member_id))
             if member is None:
-                member_mention = _("User has left the server ") + member_id[0]
+                member_mention = _("User has left the server {member_id}").format(
+                    member_id=member_id
+                )
             else:
                 member_mention = member.mention
-            if leaderboard_type.value in [2, 4, 6, 7, 8, 9]:
-                points = member_id[1].get(leaderboard_key, 0)
-                msg_list.append("#{}. {}: {}\n".format(count, member_mention, points))
-            elif leaderboard_type.value in [1, 3, 5]:
-                total = member_id[1].get(total_str, 0)
-                wins = member_id[1].get(leaderboard_key, 0)
+            if leaderboard_type.is_weekly():  # in [2, 4, 6, 7, 8, 9]:
+                points = data.get(leaderboard_type.key(), 0)
+                if not points:
+                    continue
+                msg_list.append(f"#{count}. {member_mention}: {points}\n")
+            elif leaderboard_type.is_standard():  # .value in [1, 3, 5]:
+                total = data.get(leaderboard_type.total_key(), 0)
+                wins = data.get(leaderboard_type.key(), 0)
+                if not total:
+                    continue
                 try:
                     percent = (wins / total) * 100
                 except ZeroDivisionError:
                     percent = 0.0
+                verb = _("correct")
                 msg_list.append(
-                    f"#{count}. {member_mention}: {wins}/{total} correct ({percent:.4}%)\n"
+                    f"#{count}. {member_mention}: {wins}/{total} {verb} ({percent:.4}%)\n"
                 )
-            else:
-                total = member_id[1].get(total_str, 0)
-                losses = member_id[1].get(total_str, 0) - member_id[1].get(leaderboard_key)
+            elif leaderboard_type.is_worst():
+                wins = data.get(leaderboard_type.key(), 0)
+                total = data.get(leaderboard_type.total_key(), 0)
+                losses = total - wins
+                if not losses:
+                    continue
                 try:
                     percent = (losses / total) * 100
                 except ZeroDivisionError:
                     percent = 0.0
+                verb = _("incorrect")
                 msg_list.append(
-                    f"#{count}. {member_mention}: {losses}/{total} incorrect ({percent:.4}%)\n"
+                    f"#{count}. {member_mention}: {losses}/{total} {verb} ({percent:.4}%)\n"
                 )
             count += 1
         leaderboard_list = [msg_list[i : i + 10] for i in range(0, len(msg_list), 10)]
         if user_position is not None:
             user = leaderboard[user_position][1]
-            wins = user["season"]
-            total = user[total_str] or 1
-            losses = user[total_str] - user["season"]
-            position = _(
-                "{member}, you're #{number} on the {leaderboard_type} leaderboard!\n"
-            ).format(
-                member=ctx.author.display_name,
-                number=user_position + 1,
-                leaderboard_type=leaderboard_type_str,
-            )
-            if leaderboard_type == LeaderboardType.season:
-                percent = (wins / total) * 100
+            wins = user.get(leaderboard_type.key(), 0)
+            total = user.get(leaderboard_type.total_key(), 0)
+            losses = total - wins
+            if (not leaderboard_type.is_weekly() and total) or (
+                leaderboard_type.is_weekly() and wins
+            ):
+                position = _(
+                    "{member}, you're #{number} on the {leaderboard_type} leaderboard!\n"
+                ).format(
+                    member=ctx.author.display_name,
+                    number=user_position + 1,
+                    leaderboard_type=leaderboard_type.as_str(),
+                )
+            if leaderboard_type.is_standard():
+                try:
+                    percent = (wins / total) * 100
+                except ZeroDivisionError:
+                    percent = 0.0
                 position += _("You have {wins}/{total} correct ({percent:.4}%).").format(
                     wins=wins, total=total, percent=percent
                 )
-            elif leaderboard_type == LeaderboardType.worst:
-                percent = (losses / total) * 100
+            elif leaderboard_type is LeaderboardType.worst:
+                try:
+                    percent = (losses / total) * 100
+                except ZeroDivisionError:
+                    percent = 0.0
                 position += _("You have {wins}/{total} incorrect ({percent:.4}%).").format(
                     wins=wins, total=total, percent=percent
                 )
-
+        if not leaderboard_list:
+            await ctx.send(
+                _("No data could be found in the {style} leaderboard.").format(
+                    style=leaderboard_type.as_str()
+                )
+            )
+            return
         if ctx.assume_yes:
             em = discord.Embed(timestamp=datetime.now())
             description = ""
@@ -719,15 +745,17 @@ class HockeyCommands(MixinMeta):
                 description += msg
             em.description = description
             em.set_author(
-                name=ctx.guild.name
-                + _(" Pickems {style} Leaderboard").format(style=leaderboard_type_str),
-                icon_url=ctx.guild.icon.url,
+                name=_("{guild} Pickems {style} Leaderboard").format(
+                    guild=guild.name, style=leaderboard_type.as_str()
+                ),
+                icon_url=guild.icon,
             )
-            em.set_thumbnail(url=ctx.guild.icon.url)
+            em.set_thumbnail(url=guild.icon)
             await ctx.send(embed=em)
             return
+
         await BaseMenu(
-            source=LeaderboardPages(pages=leaderboard_list, style=leaderboard_type_str),
+            source=LeaderboardPages(pages=leaderboard_list, style=leaderboard_type),
             delete_message_after=False,
             clear_reactions_after=True,
             timeout=180,
@@ -890,25 +918,15 @@ class HockeyCommands(MixinMeta):
                 "appropriate punishments ranging from a warning "
                 "to a ban. ```\n\nhttps://discord.gg/reddithockey\n"
                 "https://discord.gg/rishockey\n"
-                "https://discord.gg/sdpn\nhttps://discord.gg/thehockeyguy"
+                "https://discord.gg/c3Q7Fq4T\nhttps://discord.gg/thehockeyguy"
             )
             eastern_conference = "https://i.imgur.com/CtXvcCs.png"
             western_conference = "https://i.imgur.com/UFYJTDF.png"
-            async with self.session.get(eastern_conference) as resp:
-                data = await resp.read()
-            logo = BytesIO()
-            logo.write(data)
-            logo.seek(0)
-            image = discord.File(logo, filename="eastern_logo.png")
+            image = await self.get_image("eastern_logo.png", eastern_conference)
             await ctx.send(msg1, file=image)
             for division in team_list:
                 if division == "Central":
-                    async with self.session.get(western_conference) as resp:
-                        data = await resp.read()
-                    logo = BytesIO()
-                    logo.write(data)
-                    logo.seek(0)
-                    image = discord.File(logo, filename="western_logo.png")
+                    image = await self.get_image("western_logo.png", western_conference)
                     await ctx.send(file=image)
                 div_emoji = "<:" + TEAMS["Team {}".format(division)]["emoji"] + ">"
                 msg = "{0} __**{1} DIVISION**__ {0}".format(div_emoji, division.upper())
@@ -918,3 +936,12 @@ class HockeyCommands(MixinMeta):
                     team_link = TEAMS[team]["invite"]
                     msg = "{0} {1} {0}".format(team_emoji, team_link)
                     await ctx.channel.send(msg)
+
+    async def get_image(self, file_name: str, url: str) -> discord.File:
+        path = cog_data_path(self) / file_name
+        if not os.path.exists(path):
+            async with self.session.get(url) as resp:
+                data = await resp.read()
+            with path.open("wb") as outfile:
+                outfile.write(data)
+        return discord.File(path, filename=file_name)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, List, Optional, Union
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, List, Optional, Tuple, Union
 
 import discord
 from red_commons.logging import getLogger
@@ -13,46 +15,84 @@ log = getLogger("red.Trusty-cogs.serverstats")
 _ = Translator("serverstats", __file__)
 
 
+class AvatarDisplay(Enum):
+    default = 0
+    _global = 1
+    guild = 2
+
+    def get_name(self):
+        return {
+            AvatarDisplay.default: _("Default Avatar"),
+            AvatarDisplay._global: _("Global Avatar"),
+            AvatarDisplay.guild: _("Server Avatar"),
+        }.get(self, _("Global Avatar"))
+
+    def get_asset(self, member: Union[discord.Member, discord.User]) -> Optional[discord.Asset]:
+        if self is AvatarDisplay.default:
+            return member.default_avatar
+        elif self is AvatarDisplay.guild:
+            return getattr(member, "guild_avatar", None)
+        return member.avatar
+
+
 class AvatarPages(menus.ListPageSource):
     def __init__(self, members: List[discord.abc.User]):
         super().__init__(members, per_page=1)
         self.use_display_avatar: bool = True
+        self.avatar_display: AvatarDisplay = None
 
-    def is_paginating(self):
-        return True
+    def adjust_buttons(self, menu: BaseView, member: Union[discord.Member, discord.User]):
+        for style in AvatarDisplay:
+            if style is self.avatar_display or style.get_asset(member) is None:
+                menu.avatar_swap[style.value].disabled = True
+            else:
+                menu.avatar_swap[style.value].disabled = False
 
     async def format_page(
         self, menu: BaseView, member: Union[discord.Member, discord.User]
     ) -> discord.Embed:
-        em = discord.Embed(title=_("**Avatar**"), colour=member.colour)
-        if self.use_display_avatar:
-            url = str(member.display_avatar)
-            menu.avatar_swap.label = _("Show global avatar")
-        else:
-            url = str(member.avatar)
-            menu.avatar_swap.label = _("Show server avatar")
-        if not getattr(member, "guild_avatar", None):
-            menu.avatar_swap.disabled = True
-        else:
-            menu.avatar_swap.disabled = False
+        if self.avatar_display is None:
+            for style in AvatarDisplay:
+                if style.get_asset(member):
+                    self.avatar_display = style
+                    # iterate upwards and replace until we find the
+                    # highest level which is the guild specific avatar
+        em = discord.Embed(title=self.avatar_display.get_name(), colour=member.colour)
+        url = self.avatar_display.get_asset(member)
+        assert isinstance(url, discord.Asset)
+        self.adjust_buttons(menu, member)
+        formats = ["jpg", "png", "webp"]
+        if url.is_animated():
+            formats.append("gif")
+        if url != member.default_avatar:
+            description = (
+                " | ".join(f"[{a.upper()}]({url.replace(size=4096, format=a)})" for a in formats)
+                + "\n"
+            )
+            description += " | ".join(
+                f"[{a}]({url.replace(size=a)})" for a in [32, 64, 128, 256, 512, 1024, 2048, 4096]
+            )
+            em.description = description
         if isinstance(member, discord.Member):
             name = f"{member} {f'~ {member.nick}' if member.nick else ''}"
         else:
             name = str(member)
-        em.set_image(url=url)
+        em.set_image(url=url.replace(size=4096))
         em.set_author(name=name, icon_url=url, url=url)
         em.set_footer(text=f"Page {menu.current_page + 1}/{self.get_max_pages()}")
         return em
 
 
 class SwapAvatarButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(style=discord.ButtonStyle.grey, label=_("Show global avatar"))
+    def __init__(self, avatar_display: AvatarDisplay):
+        super().__init__(style=discord.ButtonStyle.grey, label=avatar_display.get_name())
         self.view: BaseView
+        self.avatar_display = avatar_display
 
     async def callback(self, interaction: discord.Interaction):
         source: AvatarPages = self.view.source
         source.use_display_avatar = not source.use_display_avatar
+        source.avatar_display = self.avatar_display
         await self.view.show_checked_page(self.view.current_page, interaction)
         if not interaction.response.is_done():
             await interaction.response.defer()
@@ -63,9 +103,6 @@ class GuildPages(menus.ListPageSource):
         super().__init__(guilds, per_page=1)
         self.guild: Optional[discord.Guild] = None
 
-    def is_paginating(self):
-        return True
-
     async def format_page(self, menu: menus.MenuPages, guild: discord.Guild):
         self.guild = guild
         em = await menu.cog.guild_embed(guild)
@@ -73,12 +110,35 @@ class GuildPages(menus.ListPageSource):
         return em
 
 
+class TopMemberPages(menus.ListPageSource):
+    def __init__(self, pages: List[discord.Member], include_bots: Optional[bool]):
+        super().__init__(pages, per_page=10)
+        self.members = pages
+        self.include_bots = include_bots
+
+    async def format_page(self, menu: BaseView, page: discord.Member):
+        msg = ""
+        guild = page[0].guild
+        for member in page:
+            joined_dt = getattr(member, "joined_at", None) or datetime.now(timezone.utc)
+            joined_at = discord.utils.format_dt(joined_dt)
+            msg += f"{self.members.index(member) + 1}. {member.mention} - {joined_at}\n"
+        if menu.ctx and await menu.ctx.embed_requested():
+            em = discord.Embed(description=msg)
+            title = _("{guild} top members").format(guild=guild.name)
+            if self.include_bots is False:
+                title += _(" not including bots")
+            if self.include_bots is True:
+                title = _("{guild} top bots").format(guild=guild.name)
+            em.set_author(name=title, icon_url=guild.icon)
+            em.set_footer(text=f"Page {menu.current_page + 1}/{self.get_max_pages()}")
+            return em
+        return msg
+
+
 class ListPages(menus.ListPageSource):
     def __init__(self, pages: List[Union[discord.Embed, str]]):
         super().__init__(pages, per_page=1)
-
-    def is_paginating(self):
-        return True
 
     async def format_page(self, menu: menus.MenuPages, page: Union[discord.Embed, str]):
         return page
@@ -183,7 +243,7 @@ class JoinGuildButton(discord.ui.Button):
         else:
             await interaction.response.send_message(
                 _("I cannot find or create an invite for `{guild}`").format(
-                    guild=self.source.guild.name
+                    guild=self.view.source.guild.name
                 )
             )
         if not interaction.response.is_done():
@@ -231,8 +291,11 @@ class BaseView(discord.ui.View):
             self.add_item(self.leave_guild_button)
             self.add_item(self.join_guild_button)
         if isinstance(source, AvatarPages):
-            self.avatar_swap = SwapAvatarButton()
-            self.add_item(self.avatar_swap)
+            self.avatar_swap = {}
+            for style in AvatarDisplay:
+                button = SwapAvatarButton(style)
+                self.avatar_swap[style.value] = button
+                self.add_item(button)
 
     @property
     def source(self):
@@ -244,6 +307,18 @@ class BaseView(discord.ui.View):
     async def start(self, ctx: commands.Context):
         await self.send_initial_message(ctx)
 
+    def disable_navigation(self):
+        self.first_item.disabled = True
+        self.back_button.disabled = True
+        self.forward_button.disabled = True
+        self.last_item.disabled = True
+
+    def enable_navigation(self):
+        self.first_item.disabled = False
+        self.back_button.disabled = False
+        self.forward_button.disabled = False
+        self.last_item.disabled = False
+
     async def send_initial_message(self, ctx: commands.Context):
         """|coro|
         The default implementation of :meth:`Menu.send_initial_message`
@@ -251,6 +326,8 @@ class BaseView(discord.ui.View):
         This implementation shows the first page of the source.
         """
         self.ctx = ctx
+        if not self.source.is_paginating():
+            self.disable_navigation()
         page = await self._source.get_page(self.page_start)
         kwargs = await self._get_kwargs_from_page(page)
         self.message = await ctx.send(**kwargs, view=self)
@@ -266,6 +343,10 @@ class BaseView(discord.ui.View):
             return {"embed": value, "content": None}
 
     async def show_page(self, page_number: int, interaction: discord.Interaction):
+        if not self.source.is_paginating():
+            self.disable_navigation()
+        else:
+            self.enable_navigation()
         page = await self._source.get_page(page_number)
         self.current_page = page_number
         kwargs = await self._get_kwargs_from_page(page)
@@ -290,6 +371,68 @@ class BaseView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction):
         """Just extends the default reaction_check to use owner_ids"""
         if interaction.user.id not in (*self.ctx.bot.owner_ids, self.ctx.author.id):
+            await interaction.response.send_message(
+                content=_("You are not authorized to interact with this."), ephemeral=True
+            )
+            return False
+        return True
+
+
+class ConfirmView(discord.ui.View):
+    """
+    This is just a copy of my version from Red to be removed later possibly
+    https://github.com/Cog-Creators/Red-DiscordBot/pull/6176
+    """
+
+    def __init__(
+        self,
+        author: Optional[discord.abc.User] = None,
+        *,
+        timeout: float = 180.0,
+        disable_buttons: bool = False,
+    ):
+        if timeout is None:
+            raise TypeError("This view should not be used as a persistent view.")
+        super().__init__(timeout=timeout)
+        self.result: Optional[bool] = None
+        self.author: Optional[discord.abc.User] = author
+        self.message: Optional[discord.Message] = None
+        self.disable_buttons = disable_buttons
+
+    async def on_timeout(self):
+        if self.message is None:
+            # we can't do anything here if message is none
+            return
+
+        if self.disable_buttons:
+            self.confirm_button.disabled = True
+            self.dismiss_button.disabled = True
+            await self.message.edit(view=self)
+        else:
+            await self.message.edit(view=None)
+
+    @discord.ui.button(label=_("Yes"), style=discord.ButtonStyle.green)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.result = True
+        self.stop()
+        # respond to the interaction so the user does not see "interaction failed".
+        await interaction.response.defer()
+        # call `on_timeout` explicitly here since it's not called when `stop()` is called.
+        await self.on_timeout()
+
+    @discord.ui.button(label=_("No"), style=discord.ButtonStyle.secondary)
+    async def dismiss_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.result = False
+        self.stop()
+        # respond to the interaction so the user does not see "interaction failed".
+        await interaction.response.defer()
+        # call `on_timeout` explicitly here since it's not called when `stop()` is called.
+        await self.on_timeout()
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if self.message is None:
+            self.message = interaction.message
+        if self.author and interaction.user.id != self.author.id:
             await interaction.response.send_message(
                 content=_("You are not authorized to interact with this."), ephemeral=True
             )

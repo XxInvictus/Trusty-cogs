@@ -6,7 +6,7 @@ from redbot.core import commands
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import humanize_list
 
-from .abc import MixinMeta
+from .abc import HockeyMixin
 from .constants import TEAMS
 from .helper import StandingsFinder, StateFinder, TeamFinder
 from .standings import Conferences, Divisions, Standings
@@ -15,10 +15,10 @@ _ = Translator("Hockey", __file__)
 
 log = getLogger("red.trusty-cogs.Hockey")
 
-hockeyset_commands = MixinMeta.hockeyset_commands
+hockeyset_commands = HockeyMixin.hockeyset_commands
 
 
-class HockeySetCommands(MixinMeta):
+class HockeySetCommands(HockeyMixin):
     """
     All the commands grouped under `[p]hockeyset`
     """
@@ -32,8 +32,8 @@ class HockeySetCommands(MixinMeta):
         guild = ctx.guild
         standings_channel = guild.get_channel(await self.config.guild(guild).standings_channel())
         post_standings = _("On") if await self.config.guild(guild).post_standings() else _("Off")
-        gdc_channels = await self.config.guild(guild).gdc()
-        gdt_channels = await self.config.guild(guild).gdt()
+        gdc_channels = (await self.config.guild(guild).gdc_chans()).values()
+        gdt_channels = (await self.config.guild(guild).gdt_chans()).values()
         standings_chn = "None"
         standings_msg = "None"
         if gdc_channels is None:

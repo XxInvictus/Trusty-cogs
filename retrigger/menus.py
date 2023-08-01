@@ -11,7 +11,7 @@ from redbot.core.utils.chat_formatting import box, humanize_list, pagify
 from redbot.vendored.discord.ext import menus
 
 from .abc import ReTriggerMixin
-from .converters import ChannelUserRole, Trigger, TriggerResponse
+from .converters import ChannelUserRole, MultiResponse, Trigger, TriggerResponse
 
 try:
     import regex as re
@@ -121,7 +121,11 @@ class ReTriggerPages(menus.ListPageSource):
             info += _("__Ignore commands__: **{ignore}**\n").format(ignore=trigger.ignore_commands)
         if TriggerResponse.text in trigger.response_type:
             if trigger.multi_payload:
-                text_response = "\n".join(t[1] for t in trigger.multi_payload if t[0] == "text")
+                text_response = "\n".join(
+                    str(t.response)
+                    for t in trigger.multi_payload
+                    if t.action is TriggerResponse.text
+                )
             else:
                 text_response = trigger.text
             if len(text_response) < 200:
@@ -132,25 +136,41 @@ class ReTriggerPages(menus.ListPageSource):
             )
         if TriggerResponse.rename in trigger.response_type:
             if trigger.multi_payload:
-                response = "\n".join(t[1] for t in trigger.multi_payload if t[0] == "rename")
+                response = "\n".join(
+                    str(t.response)
+                    for t in trigger.multi_payload
+                    if t.action is TriggerResponse.rename
+                )
             else:
                 response = trigger.text
             info += _("__Rename__: ") + "**{response}**\n".format(response=response)
         if TriggerResponse.dm in trigger.response_type:
             if trigger.multi_payload:
-                response = "\n".join(t[1] for t in trigger.multi_payload if t[0] == "dm")
+                response = "\n".join(
+                    str(t.response)
+                    for t in trigger.multi_payload
+                    if t.action is TriggerResponse.dm
+                )
             else:
                 response = trigger.text
             info += _("__DM__: ") + "**{response}**\n".format(response=response)
         if TriggerResponse.dmme in trigger.response_type:
             if trigger.multi_payload:
-                response = "\n".join(t[1] for t in trigger.multi_payload if t[0] == "dmme")
+                response = "\n".join(
+                    str(t.response)
+                    for t in trigger.multi_payload
+                    if t.action is TriggerResponse.dmme
+                )
             else:
                 response = trigger.text
             info += _("__Self DM__: ") + "**{response}**\n".format(response=response)
         if TriggerResponse.command in trigger.response_type:
             if trigger.multi_payload:
-                response = "\n".join(t[1] for t in trigger.multi_payload if t[0] == "command")
+                response = "\n".join(
+                    str(t.response)
+                    for t in trigger.multi_payload
+                    if t.action is TriggerResponse.command
+                )
             else:
                 response = trigger.text
             info += _("__Command__: ") + "**{response}**\n".format(response=response)
@@ -189,6 +209,8 @@ class ReTriggerPages(menus.ListPageSource):
             )
         if trigger.read_filenames:
             info += _("__Read filenames__: **Enabled**\n")
+        if trigger.read_thread_title:
+            info += _("__Read Thread Titles__: **Enabled**\n")
         if trigger.tts:
             info += _("__TTS__: **Enabled**\n")
         if trigger.chance:
@@ -200,6 +222,8 @@ class ReTriggerPages(menus.ListPageSource):
             info += _("- Everyone: **{everyone_mention}**\n").format(
                 everyone_mention=trigger.everyone_mention
             )
+        if last_modified_str := trigger.last_modified_str(view.ctx):
+            info += last_modified_str
         if trigger.regex:
             pattern_error = ""
             pattern = trigger.regex.pattern
@@ -376,11 +400,18 @@ class ToggleTriggerButton(discord.ui.Button):
         member = interaction.user
         trigger = self.view.source.selection
         guild = self.view.source.guild
-        if await self.view.cog.can_edit(member, self.view.source.selection):
+        if await self.view.cog.can_enable_or_disable(member, self.view.source.selection):
             trigger.toggle()
+            trigger._last_modified_by = member.id
+            trigger._last_modified_at = interaction.id
+            trigger._last_modified = _("enabled") if trigger.enabled else _("disabled")
             async with self.view.cog.config.guild(guild).trigger_list() as trigger_list:
                 trigger_list[trigger.name] = await trigger.to_json()
             await self.view.show_checked_page(self.view.current_page, interaction)
+        else:
+            await interaction.response.send_message(
+                _("You are not authorized to enable or disable this trigger."), ephemeral=True
+            )
 
 
 class ReTriggerEditModal(discord.ui.Modal):
@@ -401,24 +432,105 @@ class ReTriggerEditModal(discord.ui.Modal):
         self.replies = discord.ui.Select(
             max_values=1, min_values=0, placeholder="Replies", options=reply_options
         )
-        for response_type in trigger.response_type:
-            if response_type.value in ["text", "dm", "dmme", "command", "mock"]:
-                self.add_item(self.text)
-                break
+        self.multi_inputs = {}
+        text_inputs = ["text", "dm", "dmme", "command", "mock"]
+        if not trigger.multi_payload:
+            for response_type in trigger.response_type:
+                if response_type.value in text_inputs:
+                    self.add_item(self.text)
+                    break
+        else:
+            for response_type in trigger.response_type:
+                if response_type.name not in text_inputs:
+                    continue
+                self.multi_inputs[response_type] = discord.ui.TextInput(
+                    style=discord.TextStyle.short,
+                    label=response_type.name,
+                    default="".join(
+                        str(i.response) for i in trigger.multi_payload if i.action is response_type
+                    ),
+                )
+            for ti in self.multi_inputs.values():
+                try:
+                    self.add_item(ti)
+                except ValueError:
+                    # I really hope there aren't any triggers with this many text responses
+                    log.error(
+                        "ReTrigger attempted to send a modal edit with more text inputs than expected."
+                    )
+                    pass
+
         # if TriggerResponse.text in trigger.response_type:
         # self.add_item(self.replies)
         self.og_button = button
         self.trigger = trigger
 
+    async def handle_multi(self, interaction: discord.Interaction):
+        log.debug(self.multi_inputs)
+        msg = _("Editing Trigger {trigger}:\n").format(trigger=self.trigger.name)
+        guild = interaction.guild
+        any_edits = False
+        changed_values = []
+        if self.trigger._raw_regex != self.regex.value:
+            try:
+                re.compile(self.regex.value)
+            except Exception as e:
+                await interaction.response.send_message(
+                    _("The provided regex pattern is not valid: {e}").format(e=e), ephemeral=True
+                )
+                return
+            self.trigger._raw_regex = self.regex.value
+            self.trigger.compile()
+            # we've already checked if the regex was valid
+            any_edits = True
+            msg += _("- Regex\n")
+            changed_values.append("regex")
+        for response_type, ti in self.multi_inputs.items():
+            old = [i for i in self.trigger.multi_payload if i.action is response_type]
+            old_str = "".join(str(i.response) for i in old)
+            if ti.value is None:
+                continue
+            if old_str != ti.value:
+                any_edits = True
+                log.debug(
+                    "Modifying %s on trigger %r old_str=%s new_str=%s",
+                    response_type.name,
+                    self.trigger,
+                    old_str,
+                    ti.value,
+                )
+                for old_payload in old:
+                    try:
+                        self.trigger.multi_payload.remove(old_payload)
+                    except IndexError:
+                        log.error("Error removing multi payload option.")
+                self.trigger.multi_payload.append(MultiResponse(response_type, ti.value))
+                changed_values.append(response_type.name)
+                msg += _("- {response_type}").format(response_type=response_type.name)
+        if any_edits:
+            await interaction.response.send_message(msg)
+            self.trigger._last_modified_by = interaction.user.id
+            self.trigger._last_modified_at = interaction.id
+            self.trigger._last_modified = humanize_list(changed_values)
+            async with self.og_button.view.cog.config.guild(guild).trigger_list() as trigger_list:
+                trigger_list[self.trigger.name] = await self.trigger.to_json()
+        else:
+            await interaction.response.send_message(_("None of the values have changed."))
+        await self.og_button.view.show_checked_page(self.og_button.view.current_page, interaction)
+
     async def on_submit(self, interaction: discord.Interaction):
         edited_text = False
         edited_regex = False
         edited_replies = False
+        if self.trigger.multi_payload:
+            return await self.handle_multi(interaction)
         msg = _("Editing Trigger {trigger}:\n").format(trigger=self.trigger.name)
         guild = interaction.guild
+        changed_values = []
         if self.trigger.text != self.text.value:
             self.trigger.text = self.text.value
             edited_text = True
+            changed_values.append("text")
             msg += _("Text: `{text}`\n").format(text=self.text.value)
         if self.trigger._raw_regex != self.regex.value:
             try:
@@ -432,6 +544,7 @@ class ReTriggerEditModal(discord.ui.Modal):
             self.trigger.compile()
             # we've already checked if the regex was valid
             edited_regex = True
+            changed_values.append("regex")
             msg += _("Regex: `{regex}`\n").format(regex=self.regex.value)
         if self.replies.values:
             if self.replies.values[0] == "True":
@@ -441,9 +554,13 @@ class ReTriggerEditModal(discord.ui.Modal):
             else:
                 self.trigger.reply = None
             edited_replies = True
+            changed_values.append("replies")
             msg += _("Replies: `{replies}`\n").format(replies=self.replies.values[0])
         if edited_text or edited_regex or edited_replies:
             await interaction.response.send_message(msg)
+            self.trigger._last_modified_by = interaction.user.id
+            self.trigger._last_modified_at = interaction.id
+            self.trigger._last_modified = humanize_list(changed_values)
             async with self.og_button.view.cog.config.guild(guild).trigger_list() as trigger_list:
                 trigger_list[self.trigger.name] = await self.trigger.to_json()
         else:
@@ -478,7 +595,14 @@ class ReTriggerEditButton(discord.ui.Button):
         self.label = _("Edit Trigger")
 
     async def callback(self, interaction: discord.Interaction):
-        modal = ReTriggerEditModal(self.view.source.selection, self)
+        trigger = self.view.source.selection
+        cog = interaction.client.get_cog("ReTrigger")
+        if not await cog.can_edit(interaction.user, trigger):
+            await interaction.response.send_message(
+                _("You are not authorized to edit this trigger."), ephemeral=True
+            )
+            return
+        modal = ReTriggerEditModal(trigger, self)
         await interaction.response.send_modal(modal)
 
 
@@ -514,7 +638,10 @@ class DeleteTriggerButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         """Enables and disables triggers"""
         member = interaction.user
-        if await self.view.cog.can_edit(member, self.view.source.selection):
+        if (
+            await self.view.cog.can_edit(member, self.view.source.selection)
+            or member.guild_permissions.administrator
+        ):
             new_view = discord.ui.View()
             approve_button = discord.ui.Button(style=discord.ButtonStyle.green, label=_("Yes"))
             approve_button.callback = self.delete_trigger
@@ -529,8 +656,11 @@ class DeleteTriggerButton(discord.ui.Button):
                 ephemeral=True,
                 view=new_view,
             )
-        if not interaction.response.is_done():
-            await interaction.response.defer()
+        else:
+            await interaction.response.send_message(
+                _("You are not authorized to delete this trigger."), ephemeral=True
+            )
+            return
 
 
 class ReTriggerMenu(discord.ui.View):
@@ -717,11 +847,11 @@ class BaseMenu(discord.ui.View):
         self.first_item = FirstItemButton(discord.ButtonStyle.grey, 0)
         self.last_item = LastItemButton(discord.ButtonStyle.grey, 0)
         self.stop_button = StopButton(discord.ButtonStyle.red, 0)
+        self.add_item(self.stop_button)
         self.add_item(self.first_item)
         self.add_item(self.back_button)
         self.add_item(self.forward_button)
         self.add_item(self.last_item)
-        self.add_item(self.stop_button)
         self.select_view = ReTriggerSelectOption(
             options=self.source.select_options, placeholder=_("Pick a page")
         )
@@ -795,6 +925,68 @@ class BaseMenu(discord.ui.View):
             *interaction.client.owner_ids,
             self.author.id,
         ):
+            await interaction.response.send_message(
+                content=_("You are not authorized to interact with this."), ephemeral=True
+            )
+            return False
+        return True
+
+
+class ConfirmView(discord.ui.View):
+    """
+    This is just a copy of my version from Red to be removed later possibly
+    https://github.com/Cog-Creators/Red-DiscordBot/pull/6176
+    """
+
+    def __init__(
+        self,
+        author: Optional[discord.abc.User] = None,
+        *,
+        timeout: float = 180.0,
+        disable_buttons: bool = False,
+    ):
+        if timeout is None:
+            raise TypeError("This view should not be used as a persistent view.")
+        super().__init__(timeout=timeout)
+        self.result: Optional[bool] = None
+        self.author: Optional[discord.abc.User] = author
+        self.message: Optional[discord.Message] = None
+        self.disable_buttons = disable_buttons
+
+    async def on_timeout(self):
+        if self.message is None:
+            # we can't do anything here if message is none
+            return
+
+        if self.disable_buttons:
+            self.confirm_button.disabled = True
+            self.dismiss_button.disabled = True
+            await self.message.edit(view=self)
+        else:
+            await self.message.edit(view=None)
+
+    @discord.ui.button(label=_("Yes"), style=discord.ButtonStyle.green)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.result = True
+        self.stop()
+        # respond to the interaction so the user does not see "interaction failed".
+        await interaction.response.defer()
+        # call `on_timeout` explicitly here since it's not called when `stop()` is called.
+        await self.on_timeout()
+
+    @discord.ui.button(label=_("No"), style=discord.ButtonStyle.secondary)
+    async def dismiss_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.result = False
+        self.stop()
+        # respond to the interaction so the user does not see "interaction failed".
+        await interaction.response.defer()
+        # call `on_timeout` explicitly here since it's not called when `stop()` is called.
+        await self.on_timeout()
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if self.message is None:
+            self.message = interaction.message
+        if self.author and interaction.user.id != self.author.id:
             await interaction.response.send_message(
                 content=_("You are not authorized to interact with this."), ephemeral=True
             )

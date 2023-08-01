@@ -47,7 +47,7 @@ class Spotify(
     """
 
     __author__ = ["TrustyJAID", "NeuroAssassin"]
-    __version__ = "1.7.0"
+    __version__ = "1.7.2"
 
     def __init__(self, bot):
         super().__init__()
@@ -111,8 +111,12 @@ class Spotify(
         self.queue_ctx = discord.app_commands.ContextMenu(
             name="Queue on Spotify", callback=self.play_from_message
         )
+        self._commit = ""
+        self._repo = ""
 
     async def cog_load(self):
+        self.bot.tree.add_command(self.play_ctx)
+        self.bot.tree.add_command(self.queue_ctx)
         tokens = await self.bot.get_shared_api_tokens("spotify")
         if not tokens:
             self._ready.set()
@@ -143,10 +147,31 @@ class Spotify(
         Thanks Sinbad!
         """
         pre_processed = super().format_help_for_context(ctx)
-        return f"{pre_processed}\n\nCog Version: {self.__version__}\ntekore Version: {tekore.__version__}"
+        ret = f"{pre_processed}\n\n- Cog Version: {self.__version__}\n"
+        ret += f"- tekore Version: {tekore.__version__}\n"
+        if self._repo:
+            ret += f"- Repo: {self._repo}\n"
+        # we should have a commit if we have the repo but just incase
+        if self._commit:
+            ret += f"- Commit: [{self._commit[:9]}]({self._repo}/tree/{self._commit})"
+        return ret
 
     async def cog_before_invoke(self, ctx: commands.Context) -> None:
+        await self._get_commit()
         await self._ready.wait()
+
+    async def _get_commit(self):
+        if self._repo:
+            return
+        downloader = self.bot.get_cog("Downloader")
+        if not downloader:
+            return
+        cogs = await downloader.installed_cogs()
+        for cog in cogs:
+            if cog.name == "citation":
+                if cog.repo is not None:
+                    self._repo = cog.repo.clean_url
+                self._commit = cog.commit
 
     async def cog_unload(self):
         if DASHBOARD:
@@ -352,6 +377,21 @@ class Spotify(
                 for field in em_dict["fields"]:
                     content += " " + field["name"] + " " + field["value"]
             log.verbose("Spotify content: %s", content)
+        for component in message.components:
+            if not isinstance(component, discord.ActionRow):
+                if component.custom_id is not None:
+                    continue
+                if component.url is None:
+                    continue
+                content += f" {component.url}"
+            else:
+                for item in component.children:
+                    if item.custom_id is not None:
+                        continue
+                    if item.url is None:
+                        continue
+                    content += f" {item.url}"
+
         content = content.replace("🧑‍🎨", ":artist:")
         # because discord will replace this in URI's automatically 🙄
         song_data = SPOTIFY_RE.finditer(content)

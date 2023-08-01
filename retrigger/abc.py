@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
     from .converters import (
         ChannelUserRole,
-        MultiResponse,
+        MultiFlags,
         Trigger,
         TriggerExists,
         ValidEmoji,
@@ -37,6 +37,10 @@ class ReTriggerMixin(ABC):
 
     @abstractmethod
     async def can_edit(self, author: discord.Member, trigger: Trigger) -> bool:
+        raise NotImplementedError()
+
+    @abstractmethod
+    async def can_enable_or_disable(self, author: discord.Member, trigger: Trigger) -> bool:
         raise NotImplementedError()
 
     @abstractmethod
@@ -89,6 +93,11 @@ class ReTriggerMixin(ABC):
 
     @abstractmethod
     async def get_image_text(self, message: discord.Message) -> str:
+        raise NotImplementedError()
+
+    @staticmethod
+    @abstractmethod
+    def convert_embed_to_string(embed: discord.Embed, embed_index: int = 0) -> str:
         raise NotImplementedError()
 
     @abstractmethod
@@ -481,6 +490,7 @@ class ReTriggerMixin(ABC):
         ctx: commands.Context,
         name: str,
         regex: ValidRegex,
-        multi_response: commands.Greedy[MultiResponse],
+        *,
+        multi: MultiFlags,
     ) -> None:
         raise NotImplementedError()

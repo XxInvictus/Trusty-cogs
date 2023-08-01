@@ -85,7 +85,7 @@ class RoleTools(
     """
 
     __author__ = ["TrustyJAID"]
-    __version__ = "1.5.5"
+    __version__ = "1.5.9"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -120,7 +120,9 @@ class RoleTools(
         self.config.register_member(sticky_roles=[])
         self.settings: Dict[int, Any] = {}
         self._ready: asyncio.Event = asyncio.Event()
-        self.views = {}
+        self.views: Dict[int, Dict[str, discord.ui.View]] = {}
+        self._repo = ""
+        self._commit = ""
 
     def cog_check(self, ctx: commands.Context) -> bool:
         return self._ready.is_set()
@@ -130,7 +132,33 @@ class RoleTools(
         Thanks Sinbad!
         """
         pre_processed = super().format_help_for_context(ctx)
-        return f"{pre_processed}\n\nCog Version: {self.__version__}"
+        ret = f"{pre_processed}\n\n- Cog Version: {self.__version__}\n"
+        # we'll only have a repo if the cog was installed through Downloader at some point
+        if self._repo:
+            ret += f"- Repo: {self._repo}\n"
+        # we should have a commit if we have the repo but just incase
+        if self._commit:
+            ret += f"- Commit: [{self._commit[:9]}]({self._repo}/tree/{self._commit})"
+        return ret
+
+    async def add_cog_to_dev_env(self):
+        await self.bot.wait_until_red_ready()
+        if self.bot.owner_ids and 218773382617890828 in self.bot.owner_ids:
+            try:
+                self.bot.add_dev_env_value("roletools", lambda x: self)
+            except Exception:
+                pass
+
+    async def _get_commit(self):
+        downloader = self.bot.get_cog("Downloader")
+        if not downloader:
+            return
+        cogs = await downloader.installed_cogs()
+        for cog in cogs:
+            if cog.name == "roletools":
+                if cog.repo is not None:
+                    self._repo = cog.repo.clean_url
+                self._commit = cog.commit
 
     async def load_views(self):
         self.settings = await self.config.all_guilds()
@@ -143,8 +171,13 @@ class RoleTools(
             await self.initialize_buttons()
         except Exception:
             log.exception("Error initializing Buttons")
-        for view in self.views.values():
-            self.bot.add_view(view)
+        for guild_id, guild_views in self.views.items():
+            for msg_ids, view in guild_views.items():
+                log.trace("Adding view %r to %s", view, guild_id)
+                channel_id, message_id = msg_ids.split("-")
+                self.bot.add_view(view, message_id=int(message_id))
+                # These should be unique messages containing views
+                # and we should track them seperately
         self._ready.set()
 
     async def cog_load(self) -> None:
@@ -185,12 +218,19 @@ class RoleTools(
             await self.config.version.set("1.0.1")
         loop = asyncio.get_running_loop()
         loop.create_task(self.load_views())
+        loop.create_task(self.add_cog_to_dev_env())
+        loop.create_task(self._get_commit())
 
     async def cog_unload(self):
-        for view in self.views:
-            # Don't forget to remove persistent views when the cog is unloaded.
-            log.verbose("Stopping view %s", view)
-            view.stop()
+        for views in self.views.values():
+            for view in views.values():
+                # Don't forget to remove persistent views when the cog is unloaded.
+                log.verbose("Stopping view %s", view)
+                view.stop()
+        try:
+            self.bot.remove_dev_env_value("roletools")
+        except Exception:
+            pass
 
     @roletools.group(invoke_without_command=True)
     @commands.bot_has_permissions(manage_roles=True)

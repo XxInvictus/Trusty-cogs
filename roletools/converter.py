@@ -1,12 +1,18 @@
+from __future__ import annotations
+
 import re
-from typing import Tuple
+from typing import List, Optional, Tuple, Union
 
 import discord
 from discord.ext.commands import BadArgument, Converter
+from red_commons.logging import getLogger
 from redbot.core import commands
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import humanize_list
 
+from .components import ButtonRole, SelectRole, SelectRoleOption
+
+log = getLogger("red.Trusty-cogs.RoleTools")
 _ = Translator("RoleTools", __file__)
 
 
@@ -172,3 +178,218 @@ class ButtonStyleConverter(Converter):
                     argument=argument, styles=humanize_list(available_styles)
                 )
             )
+
+
+class ButtonRoleConverter(discord.app_commands.Transformer):
+    @classmethod
+    async def convert(cls, ctx: commands.Context, argument: str) -> ButtonRole:
+        cog = ctx.bot.get_cog("RoleTools")
+        async with cog.config.guild(ctx.guild).buttons() as buttons:
+            if argument.lower() in buttons:
+                # log.debug("%s Button exists", argument.lower())
+                button_data = buttons[argument.lower()]
+                role_id = button_data["role_id"]
+                emoji = button_data["emoji"]
+                if emoji is not None:
+                    emoji = discord.PartialEmoji.from_str(emoji)
+                button = ButtonRole(
+                    style=button_data["style"],
+                    label=button_data["label"],
+                    emoji=emoji,
+                    custom_id=f"{argument.lower()}-{role_id}",
+                    role_id=role_id,
+                    name=argument.lower(),
+                )
+                button.replace_label(ctx.guild)
+                return button
+            else:
+                raise commands.BadArgument(
+                    _("Button with name `{name}` does not seem to exist.").format(
+                        name=argument.lower()
+                    )
+                )
+
+    async def autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[discord.app_commands.Choice]:
+        guild = interaction.guild
+        cog = interaction.client.get_cog("RoleTools")
+        select_options = await cog.config.guild(guild).buttons()
+        supplied_options = ""
+        new_option = ""
+        for sup in current.split(" "):
+            if sup in list(select_options.keys()):
+                supplied_options += f"{sup} "
+            else:
+                new_option = sup
+
+        ret = [
+            discord.app_commands.Choice(
+                name=f"{supplied_options} {g}", value=f"{supplied_options} {g}"
+            )
+            for g in list(select_options.keys())
+            if new_option in g
+        ]
+        if supplied_options:
+            ret.insert(
+                0, discord.app_commands.Choice(name=supplied_options, value=supplied_options)
+            )
+        return ret
+
+
+class SelectOptionRoleConverter(discord.app_commands.Transformer):
+    @classmethod
+    async def convert(cls, ctx: commands.Context, argument: str) -> SelectRoleOption:
+        cog = ctx.bot.get_cog("RoleTools")
+        async with cog.config.guild(ctx.guild).select_options() as select_options:
+            if argument.lower() in select_options:
+                select_data = select_options[argument.lower()]
+                role_id = select_data["role_id"]
+                emoji = select_data["emoji"]
+                if emoji and len(emoji) > 20:
+                    emoji = discord.PartialEmoji.from_str(emoji)
+                label = select_data["label"]
+                description = select_data["description"]
+                select_role = SelectRoleOption(
+                    name=argument.lower(),
+                    label=label,
+                    value=f"RTSelect-{argument.lower()}-{role_id}",
+                    role_id=role_id,
+                    description=description,
+                    emoji=emoji,
+                )
+                return select_role
+            else:
+                raise commands.BadArgument(
+                    _("Select Option with name `{name}` does not seem to exist.").format(
+                        name=argument.lower()
+                    )
+                )
+
+    async def autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[discord.app_commands.Choice]:
+        guild = interaction.guild
+        select_options = await self.config.guild(guild).select_options()
+        supplied_options = ""
+        new_option = ""
+        for sup in current.split(" "):
+            if sup in list(select_options.keys()):
+                supplied_options += f"{sup} "
+            else:
+                new_option = sup
+
+        ret = [
+            discord.app_commands.Choice(
+                name=f"{supplied_options} {g}", value=f"{supplied_options} {g}"
+            )
+            for g in list(select_options.keys())
+            if new_option in g
+        ]
+        if supplied_options:
+            ret.insert(
+                0, discord.app_commands.Choice(name=supplied_options, value=supplied_options)
+            )
+        return ret
+
+
+class SelectRoleConverter(discord.app_commands.Transformer):
+    @classmethod
+    async def convert(cls, ctx: commands.Context, argument: str) -> SelectRole:
+        cog = ctx.bot.get_cog("RoleTools")
+        async with cog.config.guild(ctx.guild).select_menus() as select_menus:
+            # log.debug(argument)
+            if argument.lower() in select_menus:
+                select_data = select_menus[argument.lower()]
+                options = []
+                all_option_data = await cog.config.guild(ctx.guild).select_options()
+                for option_name in select_data["options"]:
+                    try:
+                        option_data = all_option_data[option_name]
+                        role_id = option_data["role_id"]
+                        description = option_data["description"]
+                        emoji = option_data["emoji"]
+                        if emoji is not None:
+                            emoji = discord.PartialEmoji.from_str(emoji)
+                        label = option_data["label"]
+                        option = SelectRoleOption(
+                            name=option_name,
+                            label=label,
+                            value=f"RTSelect-{option_name}-{role_id}",
+                            role_id=role_id,
+                            description=description,
+                            emoji=emoji,
+                        )
+                        options.append(option)
+                    except KeyError:
+                        log.exception("Somehow this errored")
+                        continue
+                sr = SelectRole(
+                    name=argument.lower(),
+                    custom_id=f"RTSelect-{argument.lower()}-{ctx.guild.id}",
+                    min_values=select_data["min_values"],
+                    max_values=select_data["max_values"],
+                    placeholder=select_data["placeholder"],
+                    options=options,
+                )
+                sr.update_options(ctx.guild)
+                return sr
+            else:
+                raise commands.BadArgument(
+                    _("Select Option with name `{name}` does not seem to exist.").format(
+                        name=argument.lower()
+                    )
+                )
+
+    async def autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[discord.app_commands.Choice]:
+        guild = interaction.guild
+        cog = interaction.client.get_cog("RoleTools")
+        select_options = await cog.config.guild(guild).select_menus()
+        supplied_options = ""
+        new_option = ""
+        for sup in current.split(" "):
+            if sup in list(select_options.keys()):
+                supplied_options += f"{sup} "
+            else:
+                new_option = sup
+
+        ret = [
+            discord.app_commands.Choice(
+                name=f"{supplied_options} {g}", value=f"{supplied_options} {g}"
+            )
+            for g in list(select_options.keys())
+            if new_option in g
+        ]
+        if supplied_options:
+            ret.insert(
+                0, discord.app_commands.Choice(name=supplied_options, value=supplied_options)
+            )
+        return ret
+
+
+class SelectMenuFlags(commands.FlagConverter, case_insensitive=True):
+    min_values: Optional[commands.Range[int, 0, 25]] = commands.flag(
+        name="min", aliases=["min_values"], default=None
+    )
+    max_values: Optional[commands.Range[int, 0, 25]] = commands.flag(
+        name="max", aliases=["max_values"], default=None
+    )
+    placeholder: Optional[str] = commands.flag(name="placeholder", default=None)
+
+
+class SelectOptionFlags(commands.FlagConverter, case_insensitive=True):
+    label: Optional[commands.Range[str, 0, 100]] = commands.flag(name="label", default=None)
+    description: Optional[commands.Range[str, 0, 100]] = commands.flag(
+        name="description", aliases=["desc"], default=None
+    )
+    emoji: Optional[Union[discord.PartialEmoji, str]] = commands.flag(name="emoji", default=None)
+
+
+class ButtonFlags(commands.FlagConverter, case_insensitive=True):
+    label: Optional[commands.Range[str, 0, 80]] = commands.flag(name="label", default=None)
+    emoji: Optional[Union[discord.PartialEmoji, str]] = commands.flag(name="emoji", default=None)
+    style: discord.ButtonStyle = commands.flag(
+        name="style", default=discord.ButtonStyle.primary, converter=ButtonStyleConverter
+    )

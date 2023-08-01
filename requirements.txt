@@ -1,6 +1,7 @@
 git+https://github.com/Kareeeeem/jpglitch
 git+https://github.com/TrustyJAID/aPRAW@setup-fix
 httpx>=0.15,<0.25
+matplotlib
 mendeleev
 moviepy
 numpy
@@ -15,7 +16,6 @@ skyfield
 tabulate
 tekore
 tweepy[async]>=4.10.0
-Unidecode
 unidecode
 wand
 yt-dlp

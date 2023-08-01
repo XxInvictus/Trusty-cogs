@@ -9,7 +9,7 @@ from redbot.core.i18n import Translator
 from redbot.core.utils import AsyncIter
 from redbot.core.utils.chat_formatting import pagify
 
-from .abc import MixinMeta
+from .abc import HockeyMixin
 from .constants import TEAMS
 from .errors import InvalidFileError
 from .game import Game
@@ -31,7 +31,7 @@ _ = Translator("Hockey", __file__)
 log = getLogger("red.trusty-cogs.hockey")
 
 
-class HockeyDev(MixinMeta):
+class HockeyDev(HockeyMixin):
     """
     All the commands grouped under `[p]hockeydev`
     """
@@ -515,7 +515,8 @@ class HockeyDev(MixinMeta):
         """
         guild = ctx.message.guild
         good_channels = []
-        for channel_id in await self.config.guild(guild).gdc():
+        gdc_chans = await self.config.guild(guild).gdc_chans()
+        for channel_id in gdc_chans.values():
             channel = guild.get_channel(channel_id)
             if channel is None:
                 await self.config.channel_from_id(channel_id).clear()

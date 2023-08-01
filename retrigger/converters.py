@@ -1,10 +1,19 @@
-import asyncio
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Dict, List, Optional, Pattern, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    NamedTuple,
+    Optional,
+    Pattern,
+    Tuple,
+    Union,
+)
 
 import discord
-from discord.ext.commands.converter import Converter, IDConverter, RoleConverter
+from discord.ext.commands.converter import Converter, IDConverter
 from discord.ext.commands.errors import BadArgument
 from red_commons.logging import getLogger
 from redbot.core import commands
@@ -22,34 +31,6 @@ if TYPE_CHECKING:
     from .abc import ReTriggerMixin
 
 
-class ConfirmView(discord.ui.View):
-    def __init__(self, ctx: Union[commands.Context, discord.Interaction], default: bool = False):
-        super().__init__()
-        self.result = default
-        self.ctx = ctx
-
-    @discord.ui.button(label=_("Yes"), style=discord.ButtonStyle.green)
-    async def yes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.result = True
-        self.stop()
-        await interaction.response.edit_message(view=None)
-
-    @discord.ui.button(label=_("No"), style=discord.ButtonStyle.red)
-    async def no_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.result = False
-        self.stop()
-        await interaction.response.edit_message(view=None)
-
-    async def interaction_check(self, interaction: discord.Interaction):
-        if isinstance(self.ctx, discord.Interaction):
-            if interaction.user.id != self.ctx.user.id:
-                return False
-        else:
-            if interaction.user.id != self.ctx.author.id:
-                return False
-        return True
-
-
 class TriggerResponse(Enum):
     dm = "dm"
     dmme = "dmme"
@@ -58,7 +39,6 @@ class TriggerResponse(Enum):
     ban = "ban"
     kick = "kick"
     text = "text"
-    filter = "delete"
     delete = "delete"
     publish = "publish"
     react = "react"
@@ -85,6 +65,46 @@ class TriggerResponse(Enum):
         }
 
     @property
+    def permissions(self) -> discord.Permissions:
+        """
+        Map Response Types to specific discord permissions.
+
+        This is a lazy approach but generally speaking all triggers
+        require the manage messages permission as a default. Other
+        response types require elevated permissions.
+
+        These are also based on actual required permissions for the action.
+        e.g. reaction management requires manage_messages permission not
+        add_reactions permission. So this is to enable more loose editing
+        allowing mods to disable specific triggers.
+        """
+        return {
+            TriggerResponse.remove_role: discord.Permissions(manage_roles=True),
+            TriggerResponse.add_role: discord.Permissions(manage_roles=True),
+            TriggerResponse.ban: discord.Permissions(ban_members=True),
+            TriggerResponse.kick: discord.Permissions(kick_members=True),
+            TriggerResponse.rename: discord.Permissions(manage_nicknames=True),
+            TriggerResponse.create_thread: discord.Permissions(manage_threads=True),
+        }.get(self, discord.Permissions(manage_messages=True))
+
+    @property
+    def required_perms(self) -> discord.Permissions:
+        return {
+            TriggerResponse.remove_role: discord.Permissions(manage_roles=True),
+            TriggerResponse.add_role: discord.Permissions(manage_roles=True),
+            TriggerResponse.ban: discord.Permissions(ban_members=True),
+            TriggerResponse.kick: discord.Permissions(kick_members=True),
+            TriggerResponse.rename: discord.Permissions(manage_nicknames=True),
+            TriggerResponse.create_thread: discord.Permissions(manage_threads=True),
+            TriggerResponse.delete: discord.Permissions(manage_messages=True),
+            TriggerResponse.image: discord.Permissions(attach_files=True),
+            TriggerResponse.randimage: discord.Permissions(attach_files=True),
+            TriggerResponse.resize: discord.Permissions(attach_files=True),
+            TriggerResponse.text: discord.Permissions(send_messages=True),
+            TriggerResponse.publish: discord.Permissions(manage_messages=True),
+        }.get(self, discord.Permissions(0))
+
+    @property
     def is_role_change(self) -> bool:
         return self in {
             TriggerResponse.add_role,
@@ -101,7 +121,6 @@ class TriggerResponse(Enum):
             TriggerResponse.ban,
             TriggerResponse.kick,
             TriggerResponse.text,
-            TriggerResponse.filter,
             TriggerResponse.delete,
             TriggerResponse.publish,
             TriggerResponse.react,
@@ -109,108 +128,75 @@ class TriggerResponse(Enum):
             TriggerResponse.command,
             TriggerResponse.mock,
             TriggerResponse.delete,
-            TriggerResponse.create_thread,
         }
 
 
-MULTI_RESPONSES = [
-    "dm",
-    "dmme",
-    "remove_role",
-    "add_role",
-    "ban",
-    "kick",
-    "text",
-    "filter",
-    "delete",
-    "publish",
-    "react",
-    "rename",
-    "command",
-    "mock",
-    "create_thread",
-]
+class MultiResponse(NamedTuple):
+    action: TriggerResponse
+    response: Union[int, str, bool]
+
+    def to_json(self):
+        return [self.action.value, self.response]
+
+    @classmethod
+    def from_json(cls, data: Tuple[str, Union[int, str, bool]]):
+        action = TriggerResponse(data[0])
+        if len(data) == 1:
+            return cls(action, True)
+        else:
+            return cls(action, data[1])
 
 
-class MultiResponse(Converter):
-    """
-    This will parse my defined multi response pattern and provide usable formats
-    to be used in multiple reponses
-    """
+class MultiFlags(commands.FlagConverter):
+    text: Optional[str] = commands.flag(name="text", default=None)
+    dm: Optional[str] = commands.flag(name="dm", default=None)
+    dmme: Optional[str] = commands.flag(name="dmme", default=None)
+    remove_role: Tuple[discord.Role, ...] = commands.flag(
+        name="remove", aliases=["remove_role"], default=()
+    )
+    add_role: Tuple[discord.Role, ...] = commands.flag(
+        name="add", aliases=["add_role"], default=()
+    )
+    ban: Optional[bool] = commands.flag(name="ban", default=None)
+    kick: Optional[bool] = commands.flag(name="kick", default=None)
+    text: Optional[str] = commands.flag(name="text", default=None)
+    delete: Optional[bool] = commands.flag(name="delete", aliases=["filter"], default=None)
+    react: Tuple[Union[discord.PartialEmoji, str], ...] = commands.flag(
+        name="react", aliases=["emoji"], default=()
+    )
+    rename: Optional[str] = commands.flag(name="rename", default=None)
+    command: Optional[str] = commands.flag(name="command", default=None)
+    mock: Optional[str] = commands.flag(name="mock", default=None)
+    publish: Optional[bool] = commands.flag(name="publish", default=None)
 
-    async def convert(self, ctx: commands.Context, argument: str) -> Union[List[str], List[int]]:
+    async def payload(self, ctx: commands.Context) -> List[MultiResponse]:
         result = []
-        match = re.split(r"(;)", argument)
-
-        log.verbose("MultiResponse match: %s", match)
-        my_perms = ctx.channel.permissions_for(ctx.me)
-        if match[0].lower() not in MULTI_RESPONSES:
-            raise BadArgument(
-                _("`{response}` is not a valid response type.").format(response=match[0])
-            )
-        for m in match:
-            if m == ";":
+        required_perms = discord.Permissions()
+        for r in TriggerResponse:
+            if not r.multi_allowed:
                 continue
+            value = getattr(self, r.value, None)
+            if value in ((), None):
+                continue
+            required_perms |= r.required_perms
+            if r in [TriggerResponse.add_role, TriggerResponse.remove_role]:
+                for role in value:
+                    if role >= ctx.me.top_role:
+                        continue
+                    result.append(MultiResponse(r, role.id))
+            elif r is TriggerResponse.react:
+                for e in value:
+                    try:
+                        emoji = await ValidEmoji().convert(ctx, str(e))
+                        result.append(MultiResponse(r, str(emoji)))
+                    except BadArgument:
+                        log.error("Emoji `%s` not found.", r)
             else:
-                result.append(m)
-        if result[0] == "filter":
-            result[0] = "delete"
-        if len(result) < 2 and result[0] not in ["delete", "ban", "kick"]:
-            raise BadArgument(_("The provided multi response pattern is not valid."))
-        if result[0] in ["add_role", "remove_role"] and not my_perms.manage_roles:
-            raise BadArgument(_('I require "Manage Roles" permission to use that.'))
-        if result[0] == "filter" and not my_perms.manage_messages:
-            raise BadArgument(_('I require "Manage Messages" permission to use that.'))
-        if result[0] == "publish" and not my_perms.manage_messages:
-            raise BadArgument(_('I require "Manage Messages" permission to use that.'))
-        if result[0] == "ban" and not my_perms.ban_members:
-            raise BadArgument(_('I require "Ban Members" permission to use that.'))
-        if result[0] == "kick" and not my_perms.kick_members:
-            raise BadArgument(_('I require "Kick Members" permission to use that.'))
-        if result[0] == "react" and not my_perms.add_reactions:
-            raise BadArgument(_('I require "Add Reactions" permission to use that.'))
-        if result[0] == "mock":
-            view = ConfirmView(ctx, default=False)
-            msg = await ctx.send(
-                _(
-                    "Mock commands can allow any user to run a command "
-                    "as if you did, are you sure you want to add this?"
-                ),
-                view=view,
-            )
-            await view.wait()
-            if not view.result:
-                raise BadArgument(_("Not creating trigger."))
-
-        def author_perms(ctx: commands.Context, role: discord.Role) -> bool:
-            if (
-                ctx.author.id == ctx.guild.owner_id
-            ):  # handles case where guild is not chunked and calls for the ID thru the endpoint instead
-                return True
-            return role < ctx.author.top_role
-
-        if result[0] in ["add_role", "remove_role"]:
-            good_roles = []
-            for r in result[1:]:
-                try:
-                    role = await RoleConverter().convert(ctx, r)
-                    if role < ctx.guild.me.top_role and author_perms(ctx, role):
-                        good_roles.append(role.id)
-                except BadArgument:
-                    log.error("Role `%s` not found.", r)
-            result = [result[0]]
-            for r_id in good_roles:
-                result.append(r_id)
-        if result[0] == "react":
-            good_emojis: List[Union[discord.Emoji, str]] = []
-            for r in result[1:]:
-                try:
-                    emoji = await ValidEmoji().convert(ctx, r)
-                    good_emojis.append(str(emoji))
-                except BadArgument:
-                    log.error("Emoji `%s` not found.", r)
-            log.verbose("MultiResponse good_emojis: %s", good_emojis)
-            result = [result[0]] + good_emojis
+                result.append(MultiResponse(r, value))
+        bot_perms = ctx.bot_permissions
+        if not (bot_perms.administrator or bot_perms >= required_perms):
+            missing_perms = discord.Permissions(required_perms.value & ~bot_perms.value)
+            raise commands.BotMissingPermissions(missing=missing_perms)
         return result
 
 
@@ -270,11 +256,15 @@ class Trigger:
         "everyone_mention",
         "nsfw",
         "read_embeds",
+        "read_thread_title",
         "_created_at",
         "thread",
         "remove_roles",
         "add_roles",
         "reactions",
+        "_last_modified_by",
+        "_last_modified_at",
+        "_last_modified",
     )
 
     def __init__(
@@ -301,14 +291,12 @@ class Trigger:
         self.whitelist: List[int] = kwargs.get("whitelist", [])
         self.blacklist: List[int] = kwargs.get("blacklist", [])
         self.cooldown: Dict[str, int] = kwargs.get("cooldown", {})
-        self.multi_payload: Union[List[MultiResponse], Tuple[MultiResponse, ...]] = kwargs.get(
-            "multi_payload", []
-        )
+        self.multi_payload: List[MultiResponse] = kwargs.get("multi_payload", [])
         self._created_at: int = kwargs.get("created_at", 0)
         self.ignore_commands: bool = kwargs.get("ignore_commands", False)
         self.check_edits: bool = kwargs.get("check_edits", False)
         self.ocr_search: bool = kwargs.get("ocr_search", False)
-        self.delete_after: int = kwargs.get("delete_after", None)
+        self.delete_after: Optional[int] = kwargs.get("delete_after", None)
         self.read_filenames: bool = kwargs.get("read_filenames", False)
         self.chance: int = kwargs.get("chance", 0)
         self.reply: Optional[bool] = kwargs.get("reply", None)
@@ -317,11 +305,15 @@ class Trigger:
         self.role_mention: bool = kwargs.get("role_mention", False)
         self.everyone_mention: bool = kwargs.get("everyone_mention", False)
         self.nsfw: bool = kwargs.get("nsfw", False)
-        self.read_embeds: bool = kwargs.get("embeds", False)
+        self.read_embeds: bool = kwargs.get("read_embeds", False)
+        self.read_thread_title: bool = kwargs.get("read_thread_title", True)
         self.thread: TriggerThread = kwargs.get("thread", TriggerThread())
         self.remove_roles: List[int] = kwargs.get("remove_roles", [])
         self.add_roles: List[int] = kwargs.get("add_roles", [])
         self.reactions: List[discord.PartialEmoji] = kwargs.get("reactions", [])
+        self._last_modified_by: Optional[int] = kwargs.get("_last_modified_by", None)
+        self._last_modified_at: Optional[int] = kwargs.get("_last_modified_at", None)
+        self._last_modified: Optional[str] = kwargs.get("_last_modified", None)
 
     def enable(self):
         """Explicitly enable this trigger"""
@@ -337,6 +329,52 @@ class Trigger:
 
     def compile(self):
         self.regex: Pattern = re.compile(self._raw_regex)
+
+    def get_permissions(self):
+        perms = discord.Permissions()
+        for resp in self.response_type:
+            perms |= resp.permissions
+        return perms
+
+    @property
+    def last_modified_by(self):
+        return self._last_modified_by
+
+    @property
+    def last_modified_at(self):
+        if self._last_modified_at is None:
+            return None
+        return discord.utils.snowflake_time(self._last_modified_at)
+
+    @property
+    def last_modified(self):
+        return self._last_modified
+
+    def last_modified_str(self, ctx: commands.Context) -> str:
+        msg = ""
+        if not any([self.last_modified_by, self.last_modified_at, self.last_modified]):
+            return msg
+        msg = _("__Last Modified__:\n")
+        if self.last_modified_by:
+            user = ctx.guild.get_member(self.last_modified_by)
+            if user is None:
+                user_str = _("Unknown user (`{user_id}`)\n").format(user_id=self.last_modified_by)
+            else:
+                user_str = user.mention
+            msg += _("- By: {user}\n").format(user=user_str)
+        if self.last_modified_at:
+            msg += "- " + discord.utils.format_dt(self.last_modified_at, "R") + "\n"
+        if self.last_modified:
+            msg += _("- Changes: {changes}\n").format(changes=self.last_modified)
+        return msg
+
+    def modify(
+        self, attr: str, value: Any, author: Union[discord.Member, discord.User], message_id: int
+    ):
+        setattr(self, attr, value)
+        self._last_modified_by = author.id
+        self._last_modified_at = message_id
+        self._last_modified = _("{attr} set to {value}.").format(attr=attr, value=value)
 
     async def check_cooldown(self, message: discord.Message) -> bool:
         now = message.created_at.timestamp()
@@ -369,10 +407,12 @@ class Trigger:
                                 return True
         return False
 
-    async def check_bw_list(self, message: discord.Message) -> bool:
+    async def check_bw_list(
+        self, author: Optional[discord.Member], channel: discord.abc.GuildChannel
+    ) -> bool:
         can_run = True
-        author: discord.Member = message.author
-        channel: discord.abc.GuildChannel = message.channel
+        # author: discord.Member = message.author
+        # channel: discord.abc.GuildChannel = message.channel
         if self.whitelist:
             can_run = False
             if channel.id in self.whitelist:
@@ -383,13 +423,14 @@ class Trigger:
                 if channel.parent.id in self.whitelist:
                     # this is a thread
                     can_run = True
-            if message.author.id in self.whitelist:
-                can_run = True
-            for role in author.roles:
-                if role.is_default():
-                    continue
-                if role.id in self.whitelist:
+            if author is not None:
+                if author.id in self.whitelist:
                     can_run = True
+                for role in author.roles:
+                    if role.is_default():
+                        continue
+                    if role.id in self.whitelist:
+                        can_run = True
             return can_run
         else:
             if channel.id in self.blacklist:
@@ -400,13 +441,14 @@ class Trigger:
                 if channel.parent.id in self.blacklist:
                     # this is a thread
                     can_run = False
-            if message.author.id in self.blacklist:
-                can_run = False
-            for role in author.roles:
-                if role.is_default():
-                    continue
-                if role.id in self.blacklist:
+            if author is not None:
+                if author.id in self.blacklist:
                     can_run = False
+                for role in author.roles:
+                    if role.is_default():
+                        continue
+                    if role.id in self.blacklist:
+                        can_run = False
         return can_run
 
     @property
@@ -461,7 +503,7 @@ class Trigger:
             "whitelist": self.whitelist,
             "blacklist": self.blacklist,
             "cooldown": self.cooldown,
-            "multi_payload": self.multi_payload,
+            "multi_payload": [i.to_json() for i in self.multi_payload],
             "created_at": self._created_at,
             "ignore_commands": self.ignore_commands,
             "check_edits": self.check_edits,
@@ -476,10 +518,14 @@ class Trigger:
             "role_mention": self.role_mention,
             "nsfw": self.nsfw,
             "read_embeds": self.read_embeds,
+            "read_thread_title": self.read_thread_title,
             "thread": self.thread.to_json(),
             "remove_roles": self.remove_roles,
             "add_roles": self.add_roles,
             "reactions": [str(e) for e in self.reactions],
+            "_last_modified_by": self._last_modified_by,
+            "_last_modified_at": self._last_modified_at,
+            "_last_modified": self._last_modified,
         }
 
     @classmethod
@@ -492,7 +538,9 @@ class Trigger:
         response_type = data.pop("response_type", [])
         if isinstance(response_type, str):
             response_type = [data["response_type"]]
-        response_type = [TriggerResponse(t) for t in response_type]
+        response_type = [
+            TriggerResponse(t) if t != "filter" else TriggerResponse.delete for t in response_type
+        ]
         if "delete" in response_type and isinstance(data["text"], bool):
             # replace old setting with new flag
             data["read_filenames"] = data["text"]
@@ -509,10 +557,20 @@ class Trigger:
         remove_roles = data.pop("remove_roles", [])
         add_roles = data.pop("add_roles", [])
         reactions = data.pop("reactions", [])
+        multi_data = data.pop("multi_payload", [])
+        multi_payload = []
+        for response in multi_data:
+            if len(response) <= 2:
+                multi_payload.append(MultiResponse.from_json(response))
+            else:
+                # incase we have multiple roles or emojis inside one "response"
+                for item in response[1:]:
+                    multi_payload.append(MultiResponse.from_json((response[0], item)))
+
         if TriggerResponse.remove_role in response_type and not remove_roles:
-            if data["multi_payload"]:
+            if multi_payload:
                 remove_roles = [
-                    r for t in data["multi_payload"] for r in t[1:] if t[0] == "remove_role"
+                    r.response for r in multi_payload if r.action is TriggerResponse.remove_role
                 ]
             else:
                 remove_roles = data.get("text", [])
@@ -520,16 +578,20 @@ class Trigger:
             if remove_roles is None:
                 remove_roles = []
         if TriggerResponse.add_role in response_type and not add_roles:
-            if data["multi_payload"]:
-                add_roles = [r for t in data["multi_payload"] for r in t[1:] if t[0] == "add_role"]
+            if multi_payload:
+                remove_roles = [
+                    r.response for r in multi_payload if r.action is TriggerResponse.add_role
+                ]
             else:
                 add_roles = data.get("text", [])
                 data["text"] = None
             if add_roles is None:
                 add_roles = []
         if TriggerResponse.react in response_type and not reactions:
-            if data["multi_payload"]:
-                reactions = [r for t in data["multi_payload"] for r in t[1:] if t[0] == "react"]
+            if multi_payload:
+                remove_roles = [
+                    r.response for r in multi_payload if r.action is TriggerResponse.react
+                ]
             else:
                 reactions = data.get("text", [])
                 data["text"] = None
@@ -543,6 +605,7 @@ class Trigger:
             regex,
             response_type,
             author,
+            multi_payload=multi_payload,
             add_roles=add_roles,
             remove_roles=remove_roles,
             reactions=reactions,
@@ -560,7 +623,36 @@ class TriggerExists(Converter[Trigger]):
         if guild.id not in cog.triggers:
             raise BadArgument(_("There are no triggers setup on this server."))
         if argument in cog.triggers[guild.id]:
-            return cog.triggers[guild.id][argument]
+            ret = cog.triggers[guild.id][argument]
+            if ctx.command in [cog.disable_trigger, cog.enable_trigger]:
+                # This allows anyone to enable or disable triggers
+                # while allowing only the author guild owner and bot owner to
+                # edit individual parts of a trigger.
+                if await cog.can_enable_or_disable(ctx.author, ret):
+                    return ret
+            if ctx.command in [cog.remove]:
+                return ret
+            if not await cog.can_edit(ctx.author, ret):
+                raise BadArgument(_("You are not authorized to edit this trigger."))
+            return ret
+        else:
+            raise BadArgument(
+                _("Trigger with name `{name}` does not exist.").format(name=argument)
+            )
+
+
+class TriggerStarExists(Converter[Trigger]):
+    async def convert(self, ctx: commands.Context, argument: str) -> List[Trigger]:
+        guild = ctx.guild
+        if guild is None:
+            raise BadArgument()
+        cog: ReTriggerMixin = ctx.bot.get_cog("ReTrigger")
+        if guild.id not in cog.triggers:
+            raise BadArgument(_("There are no triggers setup on this server."))
+        if argument in cog.triggers[guild.id]:
+            return [cog.triggers[guild.id][argument]]
+        elif argument == "*":
+            return [t for t in cog.triggers[guild.id].values()]
         else:
             raise BadArgument(
                 _("Trigger with name `{name}` does not exist.").format(name=argument)

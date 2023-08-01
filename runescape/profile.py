@@ -14,7 +14,7 @@ from red_commons.logging import getLogger
 from redbot.core.utils.chat_formatting import humanize_number, pagify
 from tabulate import tabulate
 
-HEADERS = {"User-Agent": f"Red-DiscordBot Trusty-cogs Runescape Cog"}
+from .helpers import HEADERS
 
 log = getLogger("red.trusty-cogs.runescape")
 
@@ -123,6 +123,7 @@ class Skills(Enum):
     Divination = 25
     Invention = 26
     Archaeology = 27
+    Necromancy = 28
 
 
 class Item:
@@ -160,7 +161,7 @@ class Activity:
             date = datetime.strptime(date_info, "%d-%b-%Y %H:%M")
         else:
             date = datetime.now()
-        date = tz.localize(date, is_dst=None).astimezone(timezone.utc)
+        date = tz.localize(date)
         text = data.get("text")
         activity_id = f"{int(date.timestamp())}-{text}"
         return cls(
@@ -289,6 +290,7 @@ class Profile:
     divination: Skill
     invention: Skill
     archaeology: Skill
+    necromancy: Skill
 
     def __str__(self):
         skills_list = [["Overall", self.totalskill, "{:,}".format(self.totalxp), self.rank]]
@@ -298,7 +300,7 @@ class Profile:
                 level = 1
                 xp = 0
                 rank = "Unranked"
-                skills_list.append([skill_name, level, xp, rank])
+                skills_list.append([skill_name.name, level, xp, rank])
                 continue
             level = skill.level
             xp = skill.xp
@@ -379,10 +381,10 @@ class Profile:
     @classmethod
     def from_json(cls, data: dict):
         logged_in = True if data["loggedIn"] == "true" else False
+        skills = {skill.value: 0 for skill in Skills}
         if "skillvalues" in data:
-            skills = {skill["id"]: Skill.from_json(skill) for skill in data["skillvalues"]}
-        else:
-            skills = {skill.value: 0 for skill in Skills}
+            for skill in data["skillvalues"]:
+                skills[skill["id"]] = Skill.from_json(skill)
 
         return cls(
             name=data["name"],
@@ -426,6 +428,7 @@ class Profile:
             divination=skills[25],
             invention=skills[26],
             archaeology=skills[27],
+            necromancy=skills[28],
         )
 
     @classmethod

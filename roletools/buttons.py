@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Union
-
 import discord
 from red_commons.logging import getLogger
 from redbot.core import commands
@@ -10,7 +7,8 @@ from redbot.core.commands import Context
 from redbot.core.i18n import Translator
 
 from .abc import RoleToolsMixin
-from .converter import ButtonStyleConverter, RoleHierarchyConverter
+from .components import ButtonRole, RoleToolsView
+from .converter import ButtonFlags, RoleHierarchyConverter
 from .menus import BaseMenu, ButtonRolePages
 
 roletools = RoleToolsMixin.roletools
@@ -19,196 +17,49 @@ log = getLogger("red.Trusty-cogs.RoleTools")
 _ = Translator("RoleTools", __file__)
 
 
-class ButtonRole(discord.ui.Button):
-    def __init__(
-        self,
-        style: int,
-        label: str,
-        emoji: Union[discord.PartialEmoji, str],
-        custom_id: str,
-        role_id: int,
-        name: str,
-    ):
-        self._original_label = label
-        super().__init__(
-            style=discord.ButtonStyle(style), label=label, emoji=emoji, custom_id=custom_id
-        )
-        self.role_id = role_id
-        self.name = name
-
-    def replace_label(self, guild: discord.Guild):
-        role = guild.get_role(self.role_id)
-        if role is None:
-            return
-        if self._original_label is not None:
-            label = self._original_label.replace("{count}", str(len(role.members)))
-            self.label = label
-
-    async def callback(self, interaction: discord.Interaction):
-        guild = interaction.message.guild
-        if self.disabled:
-            await interaction.response.send_message(
-                _("This button has been disabled from giving roles."), ephemeral=True
-            )
-            return
-        role = guild.get_role(self.role_id)
-        if not role:
-            await interaction.response.send_message(
-                _("The role assigned for this button does not appear to exist anymore."),
-                ephemeral=True,
-            )
-            return
-        if interaction.user.bot:
-            await interaction.response.send_message(
-                "Bots are not allowed to assign their own roles."
-            )
-            return
-        config = self.view.cog.config
-        if role not in interaction.user.roles:
-            if not await config.role(role).selfassignable():
-                await interaction.response.send_message(
-                    _("{role} is not currently self assignable.").format(role=role.mention),
-                    ephemeral=True,
-                )
-                return
-            if wait_time := await self.view.cog.check_guild_verification(interaction.user, guild):
-                # log.debug("Ignoring user due to verification check.")
-                if wait_time:
-                    wait = datetime.now(timezone.utc) + timedelta(seconds=wait_time)
-                    await interaction.response.send_message(
-                        _(
-                            "I cannot assign roles to you until you have spent more time in this server. Try again {time}."
-                        ).format(time=discord.utils.format_dt(wait)),
-                        ephemeral=True,
-                    )
-                return
-            if getattr(interaction.user, "pending", False):
-                await interaction.response.send_message(
-                    _(
-                        "You need to finish your member verification before I can assign you a role."
-                    ),
-                    ephemeral=True,
-                )
-                return
-            # log.debug(f"Adding role to {interaction.user.name} in {guild}")
-            response = await self.view.cog.give_roles(interaction.user, [role], _("Button Role"))
-            if response:
-                await interaction.response.send_message(
-                    _("I could not assign {role} for the following reasons: {reasons}").format(
-                        role=role.mention, reasons="\n".join(r.reason for r in response)
-                    ),
-                    ephemeral=True,
-                )
-                return
-            await interaction.response.send_message(
-                _("I have given you the {role} role.").format(role=role.mention), ephemeral=True
-            )
-        elif role in interaction.user.roles:
-            if not await config.role(role).selfremovable():
-                await interaction.response.send_message(
-                    _("{role} is not currently self removable.").format(role=role.mention),
-                    ephemeral=True,
-                )
-                return
-            # log.debug(f"Removing role from {interaction.user.name} in {guild}")
-            await self.view.cog.remove_roles(interaction.user, [role], _("Button Role"))
-            await interaction.response.send_message(
-                _("I have removed the {role} role from you.").format(role=role.mention),
-                ephemeral=True,
-            )
-        self.replace_label(guild)
-        await interaction.message.edit(view=self.view)
-
-
-class ButtonRoleConverter(discord.app_commands.Transformer):
-    @classmethod
-    async def convert(cls, ctx: commands.Context, argument: str) -> ButtonRole:
-        async with ctx.cog.config.guild(ctx.guild).buttons() as buttons:
-            if argument.lower() in buttons:
-                # log.debug("%s Button exists", argument.lower())
-                button_data = buttons[argument.lower()]
-                role_id = button_data["role_id"]
-                emoji = button_data["emoji"]
-                if emoji is not None:
-                    emoji = discord.PartialEmoji.from_str(emoji)
-                button = ButtonRole(
-                    style=button_data["style"],
-                    label=button_data["label"],
-                    emoji=emoji,
-                    custom_id=f"{argument.lower()}-{role_id}",
-                    role_id=role_id,
-                    name=argument.lower(),
-                )
-                button.replace_label(ctx.guild)
-                return button
-            else:
-                raise commands.BadArgument(
-                    _("Button with name `{name}` does not seem to exist.").format(
-                        name=argument.lower()
-                    )
-                )
-
-    async def autocomplete(
-        self, interaction: discord.Interaction, current: str
-    ) -> List[discord.app_commands.Choice]:
-        guild = interaction.guild
-        cog = interaction.client.get_cog("RoleTools")
-        select_options = await cog.config.guild(guild).buttons()
-        supplied_options = ""
-        new_option = ""
-        for sup in current.split(" "):
-            if sup in list(select_options.keys()):
-                supplied_options += f"{sup} "
-            else:
-                new_option = sup
-
-        ret = [
-            discord.app_commands.Choice(
-                name=f"{supplied_options} {g}", value=f"{supplied_options} {g}"
-            )
-            for g in list(select_options.keys())
-            if new_option in g
-        ]
-        if supplied_options:
-            ret.insert(
-                0, discord.app_commands.Choice(name=supplied_options, value=supplied_options)
-            )
-        return ret
-
-
-class ButtonRoleView(discord.ui.View):
-    def __init__(self, cog: RoleToolsMixin):
-        self.cog = cog
-        super().__init__(timeout=None)
-        pass
-
-
 class RoleToolsButtons(RoleToolsMixin):
     """This class handles setting up button roles"""
 
     async def initialize_buttons(self):
         for guild_id, settings in self.settings.items():
+            if guild_id not in self.views:
+                log.trace("Adding guild ID %s to views in buttons", guild_id)
+                self.views[guild_id] = {}
             for button_name, button_data in settings["buttons"].items():
                 log.verbose("Adding Button %s", button_name)
                 role_id = button_data["role_id"]
                 emoji = button_data["emoji"]
                 if emoji is not None:
                     emoji = discord.PartialEmoji.from_str(emoji)
-                button = ButtonRole(
-                    style=button_data["style"],
-                    label=button_data["label"],
-                    emoji=emoji,
-                    custom_id=f"{button_name}-{role_id}",
-                    role_id=role_id,
-                    name=button_name,
-                )
+
                 guild = self.bot.get_guild(guild_id)
-                if guild is not None:
-                    button.replace_label(guild)
-                for message_ids in button_data.get("messages", []):
-                    if message_ids not in self.views:
-                        self.views[message_ids] = ButtonRoleView(self)
-                    self.views[message_ids].add_item(button)
+                for message_id in set(button_data.get("messages", [])):
+                    # we need a new instance of this object for every message
+                    button = ButtonRole(
+                        style=button_data["style"],
+                        label=button_data["label"],
+                        emoji=emoji,
+                        custom_id=f"{button_name}-{role_id}",
+                        role_id=role_id,
+                        name=button_name,
+                    )
+                    if guild is not None:
+                        button.replace_label(guild)
+                    if message_id not in self.views[guild_id]:
+                        log.trace("Creating view for button %s", button_name)
+                        self.views[guild_id][message_id] = RoleToolsView(self)
+                    if button.custom_id not in {
+                        c.custom_id for c in self.views[guild_id][message_id].children
+                    }:
+                        try:
+                            self.views[guild_id][message_id].add_item(button)
+                        except ValueError:
+                            log.error(
+                                "There was an error adding button %s on message https://discord.com/channels/%s/%s",
+                                button.name,
+                                guild_id,
+                                message_id.replace("-", "/"),
+                            )
 
     @roletools.group(name="buttons", aliases=["button"], with_app_command=False)
     @commands.admin_or_permissions(manage_roles=True)
@@ -217,94 +68,103 @@ class RoleToolsButtons(RoleToolsMixin):
         Setup role buttons
         """
 
-    @buttons.command(name="create", with_app_command=False)
+    @buttons.command(name="create", usage="<name> <role> [extras]")
     async def create_button(
         self,
         ctx: Context,
         name: str,
         role: RoleHierarchyConverter,
-        label: Optional[str] = None,
-        emoji: Optional[Union[discord.PartialEmoji, str]] = None,
-        style: Optional[ButtonStyleConverter] = discord.ButtonStyle.primary,
+        *,
+        extras: ButtonFlags,
     ) -> None:
         """
         Create a role button
 
-        `<name>` - The name of the button for use later in setup.
-        `<role>` - The role this button will assign or remove.
-        `[label]` - The optional label for the button.
-        `[emoji]` - The optional emoji used in the button.
-        `[style]` - The background button style. Must be one of the following:
-        - `primary`
-        - `secondary`
-        - `success`
-        - `danger`
-        - `blurple`
-        - `grey`
-        - `green`
-        - `red`
+        - `<name>` - The name of the button for use later in setup.
+        - `<role>` - The role this button will assign or remove.
+        - `[extras]`
+         - `label:` - The optional label for the button.
+         - `emoji:` - The optional emoji used in the button.
+         - `style:` - The background button style. Must be one of the following:
+           - `primary`
+           - `secondary`
+           - `success`
+           - `danger`
+           - `blurple`
+           - `grey`
+           - `green`
+           - `red`
 
         Note: If no label and no emoji are provided the roles name will be used instead.
         This name will not update if the role name is changed.
+
+        Example:
+            `[p]roletools button create role1 @role label: Super fun role style: blurple emoji: 😀`
         """
         if " " in name:
             await ctx.send(_("There cannot be a space in the name of a button."))
             return
+        if ctx.guild.id not in self.views:
+            self.views[ctx.guild.id] = {}
         emoji_id = None
-        if emoji is not None:
-            if not isinstance(emoji, discord.PartialEmoji):
+        if extras.emoji is not None:
+            if not isinstance(extras.emoji, discord.PartialEmoji):
                 try:
-                    await ctx.message.add_reaction(emoji)
-                    emoji_id = str(emoji)
+                    await ctx.message.add_reaction(extras.emoji)
+                    emoji_id = str(extras.emoji)
                 except Exception:
                     emoji_id = None
             else:
-                emoji_id = f"{emoji.name}:{emoji.id}"
-                if emoji.animated:
+                emoji_id = f"{extras.emoji.name}:{extras.emoji.id}"
+                if extras.emoji.animated:
                     emoji_id = f"a:{emoji_id}"
+        label = extras.label or ""
         if not emoji_id and not label:
             label = f"@{role.name}"
 
+        button_settings = {
+            "role_id": role.id,
+            "label": label,
+            "emoji": emoji_id,
+            "style": extras.style.value,
+            "name": name.lower(),
+            "messages": [],
+        }
+        custom_id = f"{name.lower()}-{role.id}"
         async with self.config.guild(ctx.guild).buttons() as buttons:
-            messages = []
-            if name.lower() in buttons:
-                messages = buttons[name.lower()]["messages"]
-            buttons[name.lower()] = {
-                "role_id": role.id,
-                "label": label,
-                "emoji": emoji_id,
-                "style": style.value,
-                "name": name.lower(),
-                "messages": messages,
-            }
-            if ctx.guild.id not in self.settings:
-                self.settings[ctx.guild.id] = await self.config.guild(ctx.guild).all()
-            self.settings[ctx.guild.id]["buttons"][name.lower()] = {
-                "role_id": role.id,
-                "label": label,
-                "emoji": emoji_id,
-                "style": style.value,
-                "name": name.lower(),
-                "messages": messages,
-            }
+            if name.lower() in buttons and buttons[name.lower()]["role_id"] == role.id:
+                # only transfer messages settings and fix old buttons if the role ID has not changed
+                # this will allow for seamlessly modifying a buttons look
+                button_settings["messages"] = buttons[name.lower()]["messages"]
+            buttons[name.lower()] = button_settings
+
+        if ctx.guild.id not in self.settings:
+            self.settings[ctx.guild.id] = await self.config.guild(ctx.guild).all()
+        self.settings[ctx.guild.id]["buttons"][name.lower()] = button_settings
         async with self.config.role(role).buttons() as buttons:
             if name.lower() not in buttons:
                 buttons.append(name.lower())
         button = ButtonRole(
-            style=style.value,
+            style=extras.style.value,
             label=label,
             emoji=emoji_id,
-            custom_id=f"{name.lower()}-{role.id}",
+            custom_id=custom_id,
             role_id=role.id,
             name=name.lower(),
         )
+        for message_id in button_settings["messages"]:
+            # fix old buttons with the new one when interacted with
+            replacement_view = self.views.get(ctx.guild.id, {}).get(message_id, None)
+            if replacement_view is None:
+                continue
+            for item in replacement_view.children:
+                if item.custom_id == custom_id:
+                    replacement_view.remove_item(item)
+            replacement_view.add_item(button)
         button.replace_label(ctx.guild)
-        view = ButtonRoleView(self)
+        view = RoleToolsView(self, timeout=180.0)
         view.add_item(button)
-        msg = await ctx.send("Here is how your button will look.", view=view)
-        async with self.config.guild(ctx.guild).buttons() as buttons:
-            buttons[name.lower()]["messages"].append(f"{msg.channel.id}-{msg.id}")
-        self.views[f"{msg.channel.id}-{msg.id}"] = view
+        await ctx.send("Here is how your button will look.", view=view)
 
     @buttons.command(name="delete", aliases=["del", "remove"])
     async def delete_button(self, ctx: Context, *, name: str) -> None:
@@ -313,11 +173,13 @@ class RoleToolsButtons(RoleToolsMixin):
 
         `<name>` - the name of the button you want to delete.
         """
+        if ctx.guild.id not in self.views:
+            self.views[ctx.guild.id] = {}
         async with self.config.guild(ctx.guild).buttons() as buttons:
             if name in buttons:
                 role_id = buttons[name]["role_id"]
                 custom_id = f"{name.lower()}-{role_id}"
-                for view in self.views.values():
+                for view in self.views[ctx.guild.id].values():
                     for child in view.children:
                         if child.custom_id == custom_id:
                             child.disabled = True
@@ -396,3 +258,50 @@ class RoleToolsButtons(RoleToolsMixin):
             cog=self,
             page_start=0,
         ).start(ctx=ctx)
+
+    @buttons.command(name="cleanup")
+    @commands.admin_or_permissions(manage_roles=True)
+    @commands.bot_has_permissions(read_message_history=True)
+    async def button_cleanup(self, ctx: commands.Context):
+        """
+        Check each button that has registered a message still exists and remove buttons with
+        missing messages.
+
+        # Note: This will also potentially cause problems if the button exists in a thread
+        it will not be found if the thread is archived and subsequently removed.
+        """
+        guild = ctx.guild
+        async with ctx.typing():
+            async with self.config.guild(guild).buttons() as buttons:
+                for name, button_settings in self.settings[guild.id].get("buttons", {}).items():
+                    messages = set(button_settings["messages"])
+                    for message_ids in button_settings["messages"]:
+                        try:
+                            channel_id, message_id = message_ids.split("-")
+                            channel = guild.get_channel_or_thread(int(channel_id))
+                            # threads shouldn't be used and this will break if the thread
+                            # in question is archived
+                            if channel is None:
+                                messages.remove(message_ids)
+                                continue
+                            await channel.fetch_message(int(message_id))
+                        except discord.Forbidden:
+                            # We can't confirm the message doesn't exist with this
+                            continue
+                        except (discord.NotFound, discord.HTTPException):
+                            messages.remove(message_ids)
+                            log.info(
+                                "Removing %s message reference on %s button %s since it can't be found.",
+                                message_ids,
+                                name,
+                                guild.id,
+                            )
+                        except Exception:
+                            log.exception(
+                                "Error attempting to remove a message reference on select menu %s",
+                                name,
+                            )
+                            continue
+                    buttons[name]["messages"] = list(messages)
+                    self.settings[guild.id]["buttons"][name]["messages"] = list(messages)
+        await ctx.send(_("I am finished deleting old button message references."))
